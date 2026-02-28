@@ -1,12 +1,8 @@
 /* =====================================================
-   TENDER HUNTER — ROBUST WORKER VERSION
-   Fixes:
-   - Telegram 409 conflicts
-   - Puppeteer crashes
-   - Render restarts
-   - Parallel execution bugs
+   TENDER HUNTER — RENDER FREE SAFE VERSION
 ===================================================== */
 
+const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 const puppeteer = require("puppeteer-core");
 const https = require("https");
@@ -15,33 +11,34 @@ const sites = require("./sites");
 const keywords = require("./keywords");
 const negative = require("./negative");
 
-/* ================= CONFIG ================= */
+/* ================= WEB SERVER (RENDER FIX) ================= */
 
-const TOKEN = process.env.TOKEN;
-const MAX_RESULTS = 10;
-const NAV_TIMEOUT = 60000;
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-if (!TOKEN) {
-  console.error("TOKEN missing");
-  process.exit(1);
-}
+app.get("/", (req, res) => {
+  res.send("Tender Hunter running ✅");
+});
+
+app.listen(PORT, () => {
+  console.log("Health server running on port", PORT);
+});
 
 /* ================= TELEGRAM ================= */
+
+const TOKEN = process.env.TOKEN;
 
 const bot = new TelegramBot(TOKEN, {
   polling: {
     autoStart: true,
     interval: 400,
-    params: {
-      timeout: 10
-    }
+    params: { timeout: 10 }
   }
 });
 
-/* Prevent polling crash loops */
-bot.on("polling_error", err => {
-  console.log("Polling warning:", err.message);
-});
+bot.on("polling_error", err =>
+  console.log("Polling warning:", err.message)
+);
 
 console.log("Bot started");
 
@@ -53,7 +50,7 @@ let scanRunning = false;
 
 bot.onText(/\/start/, msg =>
   bot.sendMessage(msg.chat.id,
-    "✅ Tender Hunter Active\nUse /check")
+    "✅ Tender Hunter Ready\nUse /check")
 );
 
 bot.onText(/\/ping/, msg =>
@@ -64,14 +61,13 @@ bot.onText(/\/ping/, msg =>
 
 bot.onText(/\/check/, async msg => {
 
-  const chatId = msg.chat.id;
-
-  if (scanRunning) {
-    return bot.sendMessage(chatId,
-      "⏳ Scan already running...");
-  }
+  if (scanRunning)
+    return bot.sendMessage(msg.chat.id,
+      "⏳ Scan already running");
 
   scanRunning = true;
+
+  const chatId = msg.chat.id;
 
   await bot.sendMessage(chatId,
     "🔎 Checking territory tenders...");
@@ -83,7 +79,7 @@ bot.onText(/\/check/, async msg => {
       const allowed = await checkRobots(site.url);
       if (!allowed) continue;
 
-      const results = await retryScrape(site, 2);
+      const results = await scrapeSite(site);
       const filtered = filterResults(results);
 
       if (!filtered.length) {
@@ -92,13 +88,13 @@ bot.onText(/\/check/, async msg => {
         continue;
       }
 
-      for (const item of filtered.slice(0, MAX_RESULTS)) {
+      for (const item of filtered.slice(0,10)) {
         await bot.sendMessage(chatId,
           formatTender(site, item));
       }
 
     } catch (err) {
-      console.log("SITE FAILED:", site.name, err.message);
+      console.log(site.name, err.message);
       await bot.sendMessage(chatId,
         `❌ ${site.name} failed`);
     }
@@ -108,41 +104,22 @@ bot.onText(/\/check/, async msg => {
   bot.sendMessage(chatId, "✅ Scan complete");
 });
 
-/* ================= RETRY WRAPPER ================= */
-
-async function retryScrape(site, retries) {
-
-  for (let i = 0; i <= retries; i++) {
-    try {
-      return await scrapeSite(site);
-    } catch (err) {
-      if (i === retries) throw err;
-      await sleep(3000);
-    }
-  }
-}
-
 /* ================= ROBOTS ================= */
 
 function checkRobots(url) {
-
   return new Promise(resolve => {
-
     try {
       const robotsUrl = new URL("/robots.txt", url);
 
       https.get(robotsUrl, res => {
         if (res.statusCode !== 200) return resolve(true);
 
-        let data = "";
-        res.on("data", d => data += d);
-
-        res.on("end", () => {
+        let data="";
+        res.on("data", d => data+=d);
+        res.on("end", () =>
           resolve(!data.toLowerCase()
-            .includes("disallow: /"));
-        });
-
-      }).on("error", () => resolve(true));
+            .includes("disallow: /")));
+      }).on("error", ()=>resolve(true));
 
     } catch {
       resolve(true);
@@ -154,21 +131,17 @@ function checkRobots(url) {
 
 async function scrapeSite(site) {
 
-  let browser;
+  const browser = await puppeteer.launch({
+    headless: "new",
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--single-process"
+    ]
+  });
 
   try {
-
-    browser = await puppeteer.launch({
-      headless: "new",
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--single-process",
-        "--no-zygote"
-      ]
-    });
 
     const page = await browser.newPage();
 
@@ -178,21 +151,21 @@ async function scrapeSite(site) {
 
     await page.goto(site.url, {
       waitUntil: "domcontentloaded",
-      timeout: NAV_TIMEOUT
+      timeout: 60000
     });
 
     await page.waitForTimeout(4000);
 
     const data = await page.evaluate(() =>
       Array.from(document.querySelectorAll("a"))
-        .map(a => a.innerText.trim())
-        .filter(t => t.length > 30)
+        .map(a=>a.innerText.trim())
+        .filter(t=>t.length>30)
     );
 
     return data;
 
   } finally {
-    if (browser) await browser.close();
+    await browser.close();
   }
 }
 
@@ -204,13 +177,13 @@ function filterResults(results) {
 
     const lower = text.toLowerCase();
 
-    const positive = keywords.some(k =>
+    const pos = keywords.some(k =>
       lower.includes(k));
 
-    const negativeHit = negative.some(n =>
+    const neg = negative.some(n =>
       lower.includes(n));
 
-    return positive && !negativeHit;
+    return pos && !neg;
   });
 }
 
@@ -219,34 +192,18 @@ function filterResults(results) {
 function formatTender(site, text) {
 
   let score = keywords.reduce(
-    (s,k)=> text.toLowerCase().includes(k)?s+1:s,0);
-
-  const confidence =
-    score>5?"HIGH":score>2?"MEDIUM":"LOW";
+    (s,k)=>text.toLowerCase().includes(k)?s+1:s,0);
 
   const stars =
-    confidence==="HIGH"?"★★★★★":
-    confidence==="MEDIUM"?"★★★":"★★";
+    score>5?"★★★★★":
+    score>2?"★★★":"★★";
 
   return `
 ━━━━━━━━━━━━━━━━━━━━
-🔬 TENDER ALERT — ${confidence}
+🔬 TENDER ALERT
 ━━━━━━━━━━━━━━━━━━━━
 🏛 ${site.name}
 📄 ${text}
 ⭐ Priority: ${stars}
 ━━━━━━━━━━━━━━━━━━━━`;
 }
-
-/* ================= UTILS ================= */
-
-function sleep(ms){
-  return new Promise(r=>setTimeout(r,ms));
-}
-
-/* ================= SAFE SHUTDOWN ================= */
-
-process.on("SIGINT", () => {
-  console.log("Shutdown");
-  process.exit();
-});
