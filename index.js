@@ -1,6 +1,10 @@
 /* =====================================================
-   TENDER HUNTER — TERRITORY INTELLIGENCE BOT
-   Render + Puppeteer-Core Stable Version
+   TENDER HUNTER — ROBUST WORKER VERSION
+   Fixes:
+   - Telegram 409 conflicts
+   - Puppeteer crashes
+   - Render restarts
+   - Parallel execution bugs
 ===================================================== */
 
 const TelegramBot = require("node-telegram-bot-api");
@@ -11,9 +15,11 @@ const sites = require("./sites");
 const keywords = require("./keywords");
 const negative = require("./negative");
 
-/* ================= TOKEN ================= */
+/* ================= CONFIG ================= */
 
 const TOKEN = process.env.TOKEN;
+const MAX_RESULTS = 10;
+const NAV_TIMEOUT = 60000;
 
 if (!TOKEN) {
   console.error("TOKEN missing");
@@ -24,30 +30,35 @@ if (!TOKEN) {
 
 const bot = new TelegramBot(TOKEN, {
   polling: {
-    interval: 300,
     autoStart: true,
-    params: { timeout: 10 }
+    interval: 400,
+    params: {
+      timeout: 10
+    }
   }
 });
 
+/* Prevent polling crash loops */
 bot.on("polling_error", err => {
-  console.log("Polling error:", err.message);
+  console.log("Polling warning:", err.message);
 });
 
 console.log("Bot started");
 
+/* ================= STATE LOCK ================= */
+
+let scanRunning = false;
+
 /* ================= COMMANDS ================= */
 
-bot.onText(/\/start/, msg => {
-  bot.sendMessage(
-    msg.chat.id,
-    "✅ Tender Hunter Ready\nUse /check"
-  );
-});
+bot.onText(/\/start/, msg =>
+  bot.sendMessage(msg.chat.id,
+    "✅ Tender Hunter Active\nUse /check")
+);
 
-bot.onText(/\/ping/, msg => {
-  bot.sendMessage(msg.chat.id, "🏓 Pong");
-});
+bot.onText(/\/ping/, msg =>
+  bot.sendMessage(msg.chat.id, "🏓 Pong")
+);
 
 /* ================= MAIN CHECK ================= */
 
@@ -55,40 +66,63 @@ bot.onText(/\/check/, async msg => {
 
   const chatId = msg.chat.id;
 
-  await bot.sendMessage(chatId, "🔎 Checking territory tenders...");
+  if (scanRunning) {
+    return bot.sendMessage(chatId,
+      "⏳ Scan already running...");
+  }
+
+  scanRunning = true;
+
+  await bot.sendMessage(chatId,
+    "🔎 Checking territory tenders...");
 
   for (const site of sites) {
 
     try {
 
       const allowed = await checkRobots(site.url);
-      if (!allowed) {
-        console.log("Blocked by robots:", site.name);
-        continue;
-      }
+      if (!allowed) continue;
 
-      const results = await scrapeSite(site);
+      const results = await retryScrape(site, 2);
       const filtered = filterResults(results);
 
       if (!filtered.length) {
-        await bot.sendMessage(chatId, `No matches — ${site.name}`);
+        await bot.sendMessage(chatId,
+          `No matches — ${site.name}`);
         continue;
       }
 
-      for (const item of filtered.slice(0,10)) {
-        await bot.sendMessage(chatId, formatTender(site, item));
+      for (const item of filtered.slice(0, MAX_RESULTS)) {
+        await bot.sendMessage(chatId,
+          formatTender(site, item));
       }
 
     } catch (err) {
-      console.log("SCRAPE ERROR:", site.name, err.message);
-      await bot.sendMessage(chatId, `❌ ${site.name} failed`);
+      console.log("SITE FAILED:", site.name, err.message);
+      await bot.sendMessage(chatId,
+        `❌ ${site.name} failed`);
     }
   }
 
+  scanRunning = false;
   bot.sendMessage(chatId, "✅ Scan complete");
 });
 
-/* ================= ROBOTS.TXT ================= */
+/* ================= RETRY WRAPPER ================= */
+
+async function retryScrape(site, retries) {
+
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await scrapeSite(site);
+    } catch (err) {
+      if (i === retries) throw err;
+      await sleep(3000);
+    }
+  }
+}
+
+/* ================= ROBOTS ================= */
 
 function checkRobots(url) {
 
@@ -98,18 +132,14 @@ function checkRobots(url) {
       const robotsUrl = new URL("/robots.txt", url);
 
       https.get(robotsUrl, res => {
-
-        if (res.statusCode !== 200)
-          return resolve(true);
+        if (res.statusCode !== 200) return resolve(true);
 
         let data = "";
-
         res.on("data", d => data += d);
 
         res.on("end", () => {
-          if (data.toLowerCase().includes("disallow: /"))
-            resolve(false);
-          else resolve(true);
+          resolve(!data.toLowerCase()
+            .includes("disallow: /"));
         });
 
       }).on("error", () => resolve(true));
@@ -117,7 +147,6 @@ function checkRobots(url) {
     } catch {
       resolve(true);
     }
-
   });
 }
 
@@ -125,37 +154,34 @@ function checkRobots(url) {
 
 async function scrapeSite(site) {
 
-  const browser = await puppeteer.launch({
-    headless: "new",
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--single-process",
-      "--no-zygote"
-    ]
-  });
-
-  const page = await browser.newPage();
-
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-  );
-
-  await page.setViewport({
-    width: 1366,
-    height: 768
-  });
+  let browser;
 
   try {
 
-    await page.goto(site.url, {
-      waitUntil: "domcontentloaded",
-      timeout: 90000
+    browser = await puppeteer.launch({
+      headless: "new",
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--single-process",
+        "--no-zygote"
+      ]
     });
 
-    await page.waitForTimeout(5000);
+    const page = await browser.newPage();
+
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    );
+
+    await page.goto(site.url, {
+      waitUntil: "domcontentloaded",
+      timeout: NAV_TIMEOUT
+    });
+
+    await page.waitForTimeout(4000);
 
     const data = await page.evaluate(() =>
       Array.from(document.querySelectorAll("a"))
@@ -163,14 +189,10 @@ async function scrapeSite(site) {
         .filter(t => t.length > 30)
     );
 
-    await browser.close();
-
     return data;
 
-  } catch (err) {
-
-    await browser.close();
-    throw err;
+  } finally {
+    if (browser) await browser.close();
   }
 }
 
@@ -183,95 +205,48 @@ function filterResults(results) {
     const lower = text.toLowerCase();
 
     const positive = keywords.some(k =>
-      lower.includes(k.toLowerCase())
-    );
+      lower.includes(k));
 
     const negativeHit = negative.some(n =>
-      lower.includes(n.toLowerCase())
-    );
+      lower.includes(n));
 
     return positive && !negativeHit;
   });
 }
 
-/* ================= FORMAT OUTPUT ================= */
+/* ================= FORMAT ================= */
 
 function formatTender(site, text) {
 
-  const lower = text.toLowerCase();
+  let score = keywords.reduce(
+    (s,k)=> text.toLowerCase().includes(k)?s+1:s,0);
 
-  let category = "General Analytical";
+  const confidence =
+    score>5?"HIGH":score>2?"MEDIUM":"LOW";
 
-  if (lower.includes("spectro") || lower.includes("ftir"))
-    category = "Spectroscopy";
-
-  else if (lower.includes("icp") || lower.includes("xrf"))
-    category = "Elemental Analysis";
-
-  else if (lower.includes("titr"))
-    category = "Wet Chemistry";
-
-  else if (lower.includes("dissolution"))
-    category = "Pharma Testing";
-
-  else if (lower.includes("microwave"))
-    category = "Sample Preparation";
-
-  /* confidence scoring */
-
-  let score = 0;
-
-  keywords.forEach(k => {
-    if (lower.includes(k)) score++;
-  });
-
-  let confidence = "LOW";
-  let stars = "★★";
-
-  if (score > 5) {
-    confidence = "HIGH";
-    stars = "★★★★★";
-  }
-  else if (score > 2) {
-    confidence = "MEDIUM";
-    stars = "★★★";
-  }
-
-  /* territory mapping */
-
-  let location = "Territory";
-
-  const name = site.name.toLowerCase();
-
-  if (name.includes("chandigarh"))
-    location = "Chandigarh Tricity";
-  else if (name.includes("punjab"))
-    location = "Punjab";
-  else if (name.includes("jammu"))
-    location = "J&K";
-  else if (name.includes("himachal"))
-    location = "Himachal Pradesh";
+  const stars =
+    confidence==="HIGH"?"★★★★★":
+    confidence==="MEDIUM"?"★★★":"★★";
 
   return `
 ━━━━━━━━━━━━━━━━━━━━
 🔬 TENDER ALERT — ${confidence}
 ━━━━━━━━━━━━━━━━━━━━
-
-🏛 Institute:
-${site.name}
-
-📍 Location:
-${location}
-
-🧪 Category:
-${category}
-
-📄 Tender Title:
-${text}
-
-⭐ Sales Priority:
-${stars}
-
-━━━━━━━━━━━━━━━━━━━━
-`;
+🏛 ${site.name}
+📄 ${text}
+⭐ Priority: ${stars}
+━━━━━━━━━━━━━━━━━━━━`;
 }
+
+/* ================= UTILS ================= */
+
+function sleep(ms){
+  return new Promise(r=>setTimeout(r,ms));
+}
+
+/* ================= SAFE SHUTDOWN ================= */
+
+process.on("SIGINT", () => {
+  console.log("Shutdown");
+  process.exit();
+});
