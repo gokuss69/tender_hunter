@@ -4,10 +4,11 @@
   "description": "Telegram tender scraping bot",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "postinstall": "PUPPETEER_SKIP_DOWNLOAD=true npm install puppeteer"
   },
   "dependencies": {
     "node-telegram-bot-api": "^0.61.0",
-    "puppeteer": "^21.0.0"
+    "puppeteer-core": "^21.0.0"
   }
 }
