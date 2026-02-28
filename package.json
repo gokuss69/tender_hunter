@@ -1,14 +1,19 @@
 {
   "name": "tenderbot",
   "version": "1.0.0",
-  "description": "Telegram tender scraping bot",
+  "description": "Territory Tender Hunter Telegram Bot",
   "main": "index.js",
+  "type": "commonjs",
   "scripts": {
-    "start": "node index.js",
-    "postinstall": "PUPPETEER_SKIP_DOWNLOAD=true npm install puppeteer"
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": "20.x"
   },
   "dependencies": {
+    "express": "^4.19.2",
     "node-telegram-bot-api": "^0.61.0",
-    "puppeteer-core": "^21.0.0"
+    "puppeteer": "^21.11.0",
+    "dotenv": "^16.4.5"
   }
 }
