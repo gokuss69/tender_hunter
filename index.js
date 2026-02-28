@@ -1,17 +1,20 @@
 /* =====================================================
-   TENDER HUNTER — RENDER FREE SAFE VERSION
+   TENDER HUNTER — FINAL ROBUST VERSION
+   Render Free Tier + Telegram + Puppeteer Stable
 ===================================================== */
+
+require("dotenv").config();
 
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
-const puppeteer = require("puppeteer-core");
+const puppeteer = require("puppeteer");
 const https = require("https");
 
 const sites = require("./sites");
 const keywords = require("./keywords");
 const negative = require("./negative");
 
-/* ================= WEB SERVER (RENDER FIX) ================= */
+/* ================= EXPRESS HEALTH SERVER ================= */
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -24,9 +27,14 @@ app.listen(PORT, () => {
   console.log("Health server running on port", PORT);
 });
 
-/* ================= TELEGRAM ================= */
+/* ================= TELEGRAM BOT ================= */
 
 const TOKEN = process.env.TOKEN;
+
+if (!TOKEN) {
+  console.error("TOKEN missing in .env");
+  process.exit(1);
+}
 
 const bot = new TelegramBot(TOKEN, {
   polling: {
@@ -42,9 +50,33 @@ bot.on("polling_error", err =>
 
 console.log("Bot started");
 
-/* ================= STATE LOCK ================= */
+/* ================= GLOBAL STATE ================= */
 
 let scanRunning = false;
+let browser = null;
+
+/* ================= SHARED BROWSER ================= */
+
+async function getBrowser() {
+
+  if (browser) return browser;
+
+  console.log("Launching shared browser...");
+
+  browser = await puppeteer.launch({
+    headless: "new",
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--single-process",
+      "--no-zygote"
+    ]
+  });
+
+  return browser;
+}
 
 /* ================= COMMANDS ================= */
 
@@ -57,17 +89,17 @@ bot.onText(/\/ping/, msg =>
   bot.sendMessage(msg.chat.id, "🏓 Pong")
 );
 
-/* ================= MAIN CHECK ================= */
+/* ================= MAIN SCAN ================= */
 
 bot.onText(/\/check/, async msg => {
 
+  const chatId = msg.chat.id;
+
   if (scanRunning)
-    return bot.sendMessage(msg.chat.id,
+    return bot.sendMessage(chatId,
       "⏳ Scan already running");
 
   scanRunning = true;
-
-  const chatId = msg.chat.id;
 
   await bot.sendMessage(chatId,
     "🔎 Checking territory tenders...");
@@ -94,7 +126,7 @@ bot.onText(/\/check/, async msg => {
       }
 
     } catch (err) {
-      console.log(site.name, err.message);
+      console.log("SITE FAILED:", site.name, err.message);
       await bot.sendMessage(chatId,
         `❌ ${site.name} failed`);
     }
@@ -104,22 +136,30 @@ bot.onText(/\/check/, async msg => {
   bot.sendMessage(chatId, "✅ Scan complete");
 });
 
-/* ================= ROBOTS ================= */
+/* ================= ROBOTS CHECK ================= */
 
 function checkRobots(url) {
+
   return new Promise(resolve => {
+
     try {
       const robotsUrl = new URL("/robots.txt", url);
 
       https.get(robotsUrl, res => {
-        if (res.statusCode !== 200) return resolve(true);
 
-        let data="";
-        res.on("data", d => data+=d);
-        res.on("end", () =>
+        if (res.statusCode !== 200)
+          return resolve(true);
+
+        let data = "";
+
+        res.on("data", d => data += d);
+
+        res.on("end", () => {
           resolve(!data.toLowerCase()
-            .includes("disallow: /")));
-      }).on("error", ()=>resolve(true));
+            .includes("disallow: /"));
+        });
+
+      }).on("error", () => resolve(true));
 
     } catch {
       resolve(true);
@@ -131,19 +171,10 @@ function checkRobots(url) {
 
 async function scrapeSite(site) {
 
-  const browser = await puppeteer.launch({
-    headless: "new",
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--single-process"
-    ]
-  });
+  const browser = await getBrowser();
+  const page = await browser.newPage();
 
   try {
-
-    const page = await browser.newPage();
 
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
@@ -158,14 +189,14 @@ async function scrapeSite(site) {
 
     const data = await page.evaluate(() =>
       Array.from(document.querySelectorAll("a"))
-        .map(a=>a.innerText.trim())
-        .filter(t=>t.length>30)
+        .map(a => a.innerText.trim())
+        .filter(t => t.length > 30)
     );
 
     return data;
 
   } finally {
-    await browser.close();
+    await page.close();
   }
 }
 
@@ -177,33 +208,52 @@ function filterResults(results) {
 
     const lower = text.toLowerCase();
 
-    const pos = keywords.some(k =>
+    const positive = keywords.some(k =>
       lower.includes(k));
 
-    const neg = negative.some(n =>
+    const negativeHit = negative.some(n =>
       lower.includes(n));
 
-    return pos && !neg;
+    return positive && !negativeHit;
   });
 }
 
-/* ================= FORMAT ================= */
+/* ================= FORMAT OUTPUT ================= */
 
 function formatTender(site, text) {
 
   let score = keywords.reduce(
     (s,k)=>text.toLowerCase().includes(k)?s+1:s,0);
 
+  const confidence =
+    score>5?"HIGH":score>2?"MEDIUM":"LOW";
+
   const stars =
-    score>5?"★★★★★":
-    score>2?"★★★":"★★";
+    confidence==="HIGH"?"★★★★★":
+    confidence==="MEDIUM"?"★★★":"★★";
 
   return `
 ━━━━━━━━━━━━━━━━━━━━
-🔬 TENDER ALERT
+🔬 TENDER ALERT — ${confidence}
 ━━━━━━━━━━━━━━━━━━━━
+
 🏛 ${site.name}
+
 📄 ${text}
+
 ⭐ Priority: ${stars}
+
 ━━━━━━━━━━━━━━━━━━━━`;
 }
+
+/* ================= GRACEFUL SHUTDOWN ================= */
+
+async function closeBrowser() {
+  if (browser) {
+    console.log("Closing browser...");
+    await browser.close();
+  }
+}
+
+process.on("SIGINT", closeBrowser);
+process.on("SIGTERM", closeBrowser);
