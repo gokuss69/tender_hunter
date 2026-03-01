@@ -1,13 +1,12 @@
 /* =====================================================
-   TENDER HUNTER — FINAL ROBUST VERSION
-   Render Free Tier + Telegram + Puppeteer Stable
+   TENDER HUNTER — RENDER FREE SAFE FINAL VERSION
 ===================================================== */
 
 require("dotenv").config();
 
 const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
-const puppeteer = require("puppeteer");
+const puppeteer = require("puppeteer-core");
 const https = require("https");
 
 const sites = require("./sites");
@@ -52,8 +51,8 @@ console.log("Bot started");
 
 /* ================= GLOBAL STATE ================= */
 
-let scanRunning = false;
 let browser = null;
+let scanRunning = false;
 
 /* ================= SHARED BROWSER ================= */
 
@@ -64,7 +63,9 @@ async function getBrowser() {
   console.log("Launching shared browser...");
 
   browser = await puppeteer.launch({
-    headless: "new",
+    executablePath:
+      process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium",
+    headless: true,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -78,7 +79,7 @@ async function getBrowser() {
   return browser;
 }
 
-/* ================= COMMANDS ================= */
+/* ================= BOT COMMANDS ================= */
 
 bot.onText(/\/start/, msg =>
   bot.sendMessage(msg.chat.id,
@@ -139,9 +140,7 @@ bot.onText(/\/check/, async msg => {
 /* ================= ROBOTS CHECK ================= */
 
 function checkRobots(url) {
-
   return new Promise(resolve => {
-
     try {
       const robotsUrl = new URL("/robots.txt", url);
 
@@ -167,6 +166,13 @@ function checkRobots(url) {
   });
 }
 
+/* ================= NIC DETECTOR ================= */
+
+function isNICPortal(url) {
+  return url.includes("nicgep") ||
+         url.includes("eprocure.gov.in");
+}
+
 /* ================= SCRAPER ================= */
 
 async function scrapeSite(site) {
@@ -184,6 +190,38 @@ async function scrapeSite(site) {
       waitUntil: "domcontentloaded",
       timeout: 60000
     });
+
+    /* ---------- NIC PORTALS ---------- */
+
+    if (isNICPortal(site.url)) {
+
+      console.log("NIC portal detected:", site.name);
+
+      await page.waitForSelector("table", { timeout: 20000 });
+      await page.waitForTimeout(5000);
+
+      const tenders = await page.evaluate(() => {
+
+        const rows =
+          Array.from(document.querySelectorAll("table tbody tr"));
+
+        return rows.map(row => {
+
+          const cols = row.querySelectorAll("td");
+          if (cols.length < 3) return null;
+
+          const org = cols[0]?.innerText?.trim();
+          const title = cols[1]?.innerText?.trim();
+          const date = cols[2]?.innerText?.trim();
+
+          return `${title} | ${org} | Closing: ${date}`;
+        }).filter(Boolean);
+      });
+
+      return tenders;
+    }
+
+    /* ---------- NORMAL SITES ---------- */
 
     await page.waitForTimeout(4000);
 
@@ -208,22 +246,23 @@ function filterResults(results) {
 
     const lower = text.toLowerCase();
 
-    const positive = keywords.some(k =>
-      lower.includes(k));
+    const positive =
+      keywords.some(k => lower.includes(k));
 
-    const negativeHit = negative.some(n =>
-      lower.includes(n));
+    const negativeHit =
+      negative.some(n => lower.includes(n));
 
     return positive && !negativeHit;
   });
 }
 
-/* ================= FORMAT OUTPUT ================= */
+/* ================= OUTPUT FORMAT ================= */
 
 function formatTender(site, text) {
 
-  let score = keywords.reduce(
-    (s,k)=>text.toLowerCase().includes(k)?s+1:s,0);
+  let score =
+    keywords.reduce((s,k)=>
+      text.toLowerCase().includes(k)?s+1:s,0);
 
   const confidence =
     score>5?"HIGH":score>2?"MEDIUM":"LOW";
